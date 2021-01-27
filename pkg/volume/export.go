@@ -222,5 +222,5 @@ func (e *kernelExportBlockCreator) CreateExportBlock(exportID, path string, root
 	if rootSquash {
 		squash = "root_squash"
 	}
-	return "\n" + path + " " + exportSubnet + "(rw,insecure," + squash + ",fsid=" + exportID + ")\n"
+	return "\n" + path + " " + exportSubnet + "(rw,sync,no_subtree_check," + squash + ",fsid=" + exportID + ")\n"
 }
