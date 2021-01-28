@@ -31,7 +31,7 @@ import (
 	"testing"
 
 	"github.com/kubernetes-sigs/sig-storage-lib-external-provisioner/controller"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -252,6 +252,7 @@ func TestValidateOptions(t *testing.T) {
 		name               string
 		options            controller.ProvisionOptions
 		expectedGid        string
+		expectedUid        string
 		expectedRootSquash bool
 		expectError        bool
 	}{
@@ -265,6 +266,7 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
 			},
 			expectedGid: "none",
+			expectedUid: "none",
 			expectError: false,
 		},
 		{
@@ -277,6 +279,7 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
 			},
 			expectedGid: "none",
+			expectedUid: "none",
 			expectError: false,
 		},
 		{
@@ -289,6 +292,33 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
 			},
 			expectedGid: "1",
+			expectedUid: "none",
+			expectError: false,
+		},
+		{
+			name: "uid parameter value 'none'",
+			options: controller.ProvisionOptions{
+				StorageClass: &storagev1.StorageClass{
+					ReclaimPolicy: &delete,
+					Parameters:    map[string]string{"uid": "none"},
+				},
+				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
+			},
+			expectedGid: "none",
+			expectedUid: "none",
+			expectError: false,
+		},
+		{
+			name: "uid parameter value id",
+			options: controller.ProvisionOptions{
+				StorageClass: &storagev1.StorageClass{
+					ReclaimPolicy: &delete,
+					Parameters:    map[string]string{"uid": "1"},
+				},
+				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
+			},
+			expectedGid: "none",
+			expectedUid: "1",
 			expectError: false,
 		},
 		{
@@ -300,6 +330,7 @@ func TestValidateOptions(t *testing.T) {
 				},
 			},
 			expectedGid: "",
+			expectedUid: "",
 			expectError: true,
 		},
 		{
@@ -311,6 +342,7 @@ func TestValidateOptions(t *testing.T) {
 				},
 			},
 			expectedGid: "",
+			expectedUid: "",
 			expectError: true,
 		},
 		{
@@ -322,6 +354,7 @@ func TestValidateOptions(t *testing.T) {
 				},
 			},
 			expectedGid: "",
+			expectedUid: "",
 			expectError: true,
 		},
 		{
@@ -333,6 +366,43 @@ func TestValidateOptions(t *testing.T) {
 				},
 			},
 			expectedGid: "",
+			expectedUid: "",
+			expectError: true,
+		},
+		{
+			name: "bad uid parameter value string",
+			options: controller.ProvisionOptions{
+				StorageClass: &storagev1.StorageClass{
+					ReclaimPolicy: &delete,
+					Parameters:    map[string]string{"uid": "foo"},
+				},
+			},
+			expectedGid: "",
+			expectedUid: "",
+			expectError: true,
+		},
+		{
+			name: "bad uid parameter value zero",
+			options: controller.ProvisionOptions{
+				StorageClass: &storagev1.StorageClass{
+					ReclaimPolicy: &delete,
+					Parameters:    map[string]string{"uid": "0"},
+				},
+			},
+			expectedGid: "",
+			expectedUid: "",
+			expectError: true,
+		},
+		{
+			name: "bad uid parameter value negative",
+			options: controller.ProvisionOptions{
+				StorageClass: &storagev1.StorageClass{
+					ReclaimPolicy: &delete,
+					Parameters:    map[string]string{"gid": "-1"},
+				},
+			},
+			expectedGid: "",
+			expectedUid: "",
 			expectError: true,
 		},
 		{
@@ -346,6 +416,7 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
 			},
 			expectedGid:        "none",
+			expectedUid:        "none",
 			expectedRootSquash: true,
 			expectError:        false,
 		},
@@ -360,6 +431,7 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
 			},
 			expectedGid:        "none",
+			expectedUid:        "none",
 			expectedRootSquash: false,
 			expectError:        false,
 		},
@@ -386,6 +458,7 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ki"), nil, nil),
 			},
 			expectedGid: "none",
+			expectedUid: "none",
 			expectError: false,
 		},
 		// TODO implement options.ProvisionerSelector parsing
@@ -398,6 +471,7 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ki"), nil, &metav1.LabelSelector{MatchLabels: nil}),
 			},
 			expectedGid: "",
+			expectedUid: "",
 			expectError: true,
 		},
 		{
@@ -409,6 +483,7 @@ func TestValidateOptions(t *testing.T) {
 				PVC: newClaim(resource.MustParse("1Ei"), nil, nil),
 			},
 			expectedGid: "",
+			expectedUid: "",
 			expectError: true,
 		},
 	}
@@ -417,9 +492,10 @@ func TestValidateOptions(t *testing.T) {
 	p := newNFSProvisionerInternal(tmpDir+"/", client, false, &testExporter{}, newDummyQuotaer(), "", -1, "*")
 
 	for _, test := range tests {
-		gid, rootSquash, _, err := p.validateOptions(test.options)
+		uid, gid, rootSquash, _, err := p.validateOptions(test.options)
 
 		evaluate(t, test.name, test.expectError, err, test.expectedGid, gid, "gid")
+		evaluate(t, test.name, test.expectError, err, test.expectedUid, uid, "uid")
 		evaluate(t, test.name, test.expectError, err, test.expectedRootSquash, rootSquash, "root squash")
 	}
 }
@@ -485,12 +561,15 @@ func TestCreateDirectory(t *testing.T) {
 
 	fi, _ := os.Stat(tmpDir)
 	defaultGid := fi.Sys().(*syscall.Stat_t).Gid
+	defaultUid := fi.Sys().(*syscall.Stat_t).Uid
 
 	tests := []struct {
 		name         string
 		directory    string
 		gid          string
+		uid          string
 		expectedGid  uint32
+		expectedUid  uint32
 		expectedPerm os.FileMode
 		expectError  bool
 	}{
@@ -498,7 +577,9 @@ func TestCreateDirectory(t *testing.T) {
 			name:         "gid none",
 			directory:    "foo",
 			gid:          "none",
+			uid:          "none",
 			expectedGid:  defaultGid,
+			expectedUid:  defaultUid,
 			expectedPerm: os.FileMode(0777),
 			expectError:  false,
 		},
@@ -514,7 +595,9 @@ func TestCreateDirectory(t *testing.T) {
 			name:         "path already exists",
 			directory:    "foo",
 			gid:          "none",
+			uid:          "none",
 			expectedGid:  0,
+			expectedUid:  0,
 			expectedPerm: 0,
 			expectError:  true,
 		},
@@ -522,7 +605,9 @@ func TestCreateDirectory(t *testing.T) {
 			name:         "bad gid",
 			directory:    "baz",
 			gid:          "foo",
+			uid:          "foo",
 			expectedGid:  0,
+			expectedUid:  0,
 			expectedPerm: 0,
 			expectError:  true,
 		},
@@ -535,9 +620,10 @@ func TestCreateDirectory(t *testing.T) {
 		path := p.exportDir + test.directory
 		defer os.RemoveAll(path)
 
-		err := p.createDirectory(test.directory, test.gid)
+		err := p.createDirectory(test.directory, test.gid, test.uid)
 
 		var gid uint32
+		var uid uint32
 		var perm os.FileMode
 		var fi os.FileInfo
 		if !test.expectError {
@@ -547,11 +633,13 @@ func TestCreateDirectory(t *testing.T) {
 				t.Errorf("stat %s failed with error: %v", path, err)
 			} else {
 				gid = fi.Sys().(*syscall.Stat_t).Gid
+				uid = fi.Sys().(*syscall.Stat_t).Uid
 				perm = fi.Mode().Perm()
 			}
 		}
 
 		evaluate(t, test.name, test.expectError, err, test.expectedGid, gid, "gid owner")
+		evaluate(t, test.name, test.expectError, err, test.expectedUid, uid, "uid owner")
 		evaluate(t, test.name, test.expectError, err, test.expectedPerm, perm, "permission bits")
 	}
 }

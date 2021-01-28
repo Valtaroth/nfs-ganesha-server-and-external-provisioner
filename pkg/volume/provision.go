@@ -29,7 +29,7 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/kubernetes-sigs/sig-storage-lib-external-provisioner/controller"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -259,7 +259,7 @@ type volume struct {
 // config or /etc/exports, and the exportID
 // TODO return values
 func (p *nfsProvisioner) createVolume(options controller.ProvisionOptions) (volume, error) {
-	gid, rootSquash, mountOptions, err := p.validateOptions(options)
+	uid, gid, rootSquash, mountOptions, err := p.validateOptions(options)
 	if err != nil {
 		return volume{}, fmt.Errorf("error validating options for volume: %v", err)
 	}
@@ -275,7 +275,7 @@ func (p *nfsProvisioner) createVolume(options controller.ProvisionOptions) (volu
 
 	path := path.Join(p.exportDir, options.PVName)
 
-	err = p.createDirectory(options.PVName, gid)
+	err = p.createDirectory(options.PVName, gid, uid)
 	if err != nil {
 		return volume{}, fmt.Errorf("error creating directory for volume: %v", err)
 	}
@@ -304,30 +304,39 @@ func (p *nfsProvisioner) createVolume(options controller.ProvisionOptions) (volu
 	}, nil
 }
 
-func (p *nfsProvisioner) validateOptions(options controller.ProvisionOptions) (string, bool, string, error) {
+func (p *nfsProvisioner) validateOptions(options controller.ProvisionOptions) (string, string, bool, string, error) {
+	uid := "none"
 	gid := "none"
 	rootSquash := false
 	mountOptions := ""
 	for k, v := range options.StorageClass.Parameters {
 		switch strings.ToLower(k) {
+		case "uid":
+			if strings.ToLower(v) == "none" {
+				uid = "none"
+			} else if i, err := strconv.ParseUint(v, 10, 64); err == nil && i != 0 {
+				uid = v
+			} else {
+				return "", "", false, "", fmt.Errorf("invalid value for parameter uid: %v. valid values are: 'none' or a non-zero integer", v)
+			}
 		case "gid":
 			if strings.ToLower(v) == "none" {
 				gid = "none"
 			} else if i, err := strconv.ParseUint(v, 10, 64); err == nil && i != 0 {
 				gid = v
 			} else {
-				return "", false, "", fmt.Errorf("invalid value for parameter gid: %v. valid values are: 'none' or a non-zero integer", v)
+				return "", "", false, "", fmt.Errorf("invalid value for parameter gid: %v. valid values are: 'none' or a non-zero integer", v)
 			}
 		case "rootsquash":
 			var err error
 			rootSquash, err = strconv.ParseBool(v)
 			if err != nil {
-				return "", false, "", fmt.Errorf("invalid value for parameter rootSquash: %v. valid values are: 'true' or 'false'", v)
+				return "", "", false, "", fmt.Errorf("invalid value for parameter rootSquash: %v. valid values are: 'true' or 'false'", v)
 			}
 		case "mountoptions":
 			mountOptions = v
 		default:
-			return "", false, "", fmt.Errorf("invalid parameter: %q", k)
+			return "", "", false, "", fmt.Errorf("invalid parameter: %q", k)
 		}
 	}
 
@@ -335,21 +344,21 @@ func (p *nfsProvisioner) validateOptions(options controller.ProvisionOptions) (s
 	// pv.Labels MUST be set to match claim.spec.selector
 	// gid selector? with or without pv annotation?
 	if options.PVC.Spec.Selector != nil {
-		return "", false, "", fmt.Errorf("claim.Spec.Selector is not supported")
+		return "", "", false, "", fmt.Errorf("claim.Spec.Selector is not supported")
 	}
 
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(p.exportDir, &stat); err != nil {
-		return "", false, "", fmt.Errorf("error calling statfs on %v: %v", p.exportDir, err)
+		return "", "", false, "", fmt.Errorf("error calling statfs on %v: %v", p.exportDir, err)
 	}
 	capacity := options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
 	requestBytes := capacity.Value()
 	available := int64(stat.Bavail) * int64(stat.Bsize)
 	if requestBytes > available {
-		return "", false, "", fmt.Errorf("insufficient available space %v bytes to satisfy claim for %v bytes", available, requestBytes)
+		return "", "", false, "", fmt.Errorf("insufficient available space %v bytes to satisfy claim for %v bytes", available, requestBytes)
 	}
 
-	return gid, rootSquash, mountOptions, nil
+	return uid, gid, rootSquash, mountOptions, nil
 }
 
 // getServer gets the server IP to put in a provisioned PV's spec.
@@ -457,17 +466,23 @@ func (p *nfsProvisioner) checkExportLimit() bool {
 
 // createDirectory creates the given directory in exportDir with appropriate
 // permissions and ownership according to the given gid parameter string.
-func (p *nfsProvisioner) createDirectory(directory, gid string) error {
+func (p *nfsProvisioner) createDirectory(directory, gid string, uid string) error {
 	// TODO quotas
 	path := path.Join(p.exportDir, directory)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		return fmt.Errorf("the path already exists")
 	}
 
-	perm := os.FileMode(0777 | os.ModeSetgid)
-	if gid != "none" {
+	perm := os.FileMode(0777 | os.ModeSetgid | os.ModeSetuid)
+	if gid != "none" || uid != "none" {
 		// Execute permission is required for stat, which kubelet uses during unmount.
-		perm = os.FileMode(0071 | os.ModeSetgid)
+		perm = os.FileMode(0001)
+		if gid != "none" {
+			perm = perm | 0071 | os.ModeSetgid
+		}
+		if uid != "none" {
+			perm = perm | 0701 | os.ModeSetuid
+		}
 	}
 	if err := os.MkdirAll(path, perm); err != nil {
 		return err
@@ -489,6 +504,20 @@ func (p *nfsProvisioner) createDirectory(directory, gid string) error {
 		if err != nil {
 			os.RemoveAll(path)
 			return fmt.Errorf("chgrp failed with error: %v, output: %s", err, out)
+		}
+	}
+
+	if uid != "none" {
+		userID, err := strconv.ParseUint(uid, 10, 64)
+		if err != nil {
+			os.RemoveAll(path)
+			return fmt.Errorf("strconv.ParseUint failed with error: %v", err)
+		}
+		cmd := exec.Command("chown", strconv.FormatUint(userID, 10), path)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			os.RemoveAll(path)
+			return fmt.Errorf("chown failed with error: %v, output: %s", err, out)
 		}
 	}
 
